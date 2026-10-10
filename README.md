@@ -120,5 +120,3 @@ docker-compose.yml           Configuración de ejecución en contenedor
 - **Bedrock deniega la solicitud o el modelo no aparece:** confirma permisos para invocar el modelo, que el modelo esté habilitado en la cuenta y que la región sea `us-east-1`.
 - **No se guarda el historial:** configura `CHAT_BUCKET_NAME` y verifica los permisos S3 para el bucket.
 - **La base no se puede consultar:** detén la app y ejecuta `python -m services.database` para reconstruir la base de muestra. Esto borra los datos que hayas agregado a `ventas`.
-
-# s2026q3b-agente-ventas-lauraretamal
