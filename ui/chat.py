@@ -48,19 +48,19 @@ def hide_chat_icons() -> None:
     """, unsafe_allow_html=True)
 
 
-def _safe_output(path: str | None) -> Path | None:
+def _safe_output(path: str | None, output_dir: Path = OUTPUT_DIR) -> Path | None:
     """Valida que un archivo visible exista dentro de outputs/."""
     if not path:
         return None
     try:
         candidate = Path(path).resolve()
-        candidate.relative_to(OUTPUT_DIR.resolve())
+        candidate.relative_to(output_dir.resolve())
         return candidate if candidate.is_file() else None
     except (OSError, ValueError):
         return None
 
 
-def show_messages() -> None:
+def show_messages(output_dir: Path = OUTPUT_DIR) -> None:
     """Dibuja respuestas, tablas, gráficos y descargas sin exponer SQL interno."""
     for index, message in enumerate(st.session_state.messages):
         role = message.get("role", "assistant")
@@ -77,12 +77,12 @@ def show_messages() -> None:
                     st.caption(f"Filas mostradas: {min(len(table), 50)} · Total: {message['total_rows']}")
             charts = message.get("chart_paths") or [message.get("chart_path")]
             for chart_value in charts:
-                chart = _safe_output(chart_value)
+                chart = _safe_output(chart_value, output_dir)
                 if chart:
                     st.image(str(chart), use_container_width=True)
             files = message.get("file_paths") or [message.get("file_path")]
             for file_index, file_value in enumerate(files):
-                file_path = _safe_output(file_value)
+                file_path = _safe_output(file_value, output_dir)
                 if not file_path:
                     continue
                 st.download_button(

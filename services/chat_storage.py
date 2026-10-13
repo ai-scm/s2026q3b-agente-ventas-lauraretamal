@@ -1,57 +1,25 @@
-"""Persistencia opcional de conversaciones en S3 bajo el prefijo ventas/."""
+"""Conversaciones locales separadas por espacio de trabajo."""
 
 import json
-import os
-from datetime import datetime
+import re
+import uuid
+from pathlib import Path
 from typing import Any
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
 
-CHAT_BUCKET_NAME = os.getenv("CHAT_BUCKET_NAME")
-S3 = boto3.client("s3", region_name="us-east-1") if CHAT_BUCKET_NAME else None
-PREFIX = "ventas/"
-INDEX_KEY = f"{PREFIX}index.json"
-
-
-def persistence_enabled() -> bool:
-    """Indica si se configuró un bucket para persistir chats."""
-    return bool(CHAT_BUCKET_NAME)
+from services.workspaces import get_workspace
 
 
 def new_chat_id() -> str:
-    """Genera un identificador temporal para una conversación."""
-    return datetime.now().strftime("chat_%Y%m%d_%H%M%S_%f")
+    return f"chat_{uuid.uuid4().hex}"
 
 
-def _key(chat_id: str) -> str:
-    """Construye una clave S3 validando el identificador del chat."""
-    if not chat_id.startswith("chat_") or "/" in chat_id or "\\" in chat_id:
-        raise ValueError("Identificador de chat no válido.")
-    return f"{PREFIX}{chat_id}.json"
-
-
-def _read_index() -> dict[str, str]:
-    """Lee el índice compacto de títulos; no descarga los chats individuales."""
-    if not S3 or not CHAT_BUCKET_NAME:
-        return {}
-    try:
-        obj = S3.get_object(Bucket=CHAT_BUCKET_NAME, Key=INDEX_KEY)
-        value = json.loads(obj["Body"].read().decode("utf-8"))
-        return value if isinstance(value, dict) else {}
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "404", "NotFound"}:
-            return {}
-        raise
-
-
-def _write_index(index: dict[str, str]) -> None:
-    """Guarda el índice compacto de títulos de conversación."""
-    if S3 and CHAT_BUCKET_NAME:
-        S3.put_object(Bucket=CHAT_BUCKET_NAME, Key=INDEX_KEY, Body=json.dumps(index, ensure_ascii=False).encode("utf-8"), ContentType="application/json")
+def _chat_path(workspace_id: str, chat_id: str) -> Path:
+    if not re.fullmatch(r"chat_[a-f0-9]{32}", chat_id):
+        raise ValueError("Identificador de conversación no válido.")
+    return get_workspace(workspace_id)["chat_dir"] / f"{chat_id}.json"
 
 
 def _normalize_messages(payload: Any) -> list[dict[str, Any]]:
-    """Migra chats antiguos guardados como role/content a objetos multimodales."""
     if isinstance(payload, dict):
         payload = payload.get("messages", [])
     normalized = []
@@ -69,58 +37,40 @@ def _normalize_messages(payload: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def save_chat(messages: list[dict[str, Any]], chat_id: str, title: str | None = None) -> bool:
-    """Guarda el chat y actualiza un índice para consultar títulos sin descargarlo."""
-    if not S3 or not CHAT_BUCKET_NAME:
-        return False
+def save_chat(messages: list[dict[str, Any]], chat_id: str, workspace_id: str, results: dict | None = None) -> bool:
     normalized = _normalize_messages(messages)
-    saved_title = title or next((m["text"][:60] for m in normalized if m["role"] == "user" and m["text"]), "Nueva conversación")
-    S3.put_object(Bucket=CHAT_BUCKET_NAME, Key=_key(chat_id), Body=json.dumps({"title": saved_title, "messages": normalized}, ensure_ascii=False, indent=2).encode("utf-8"), ContentType="application/json")
-    index = _read_index()
-    index[chat_id] = saved_title
-    _write_index(index)
+    title = next((message["text"][:60] for message in normalized if message["role"] == "user" and message["text"]), "Nueva conversación")
+    payload = {"title": title, "messages": normalized, "results": results or {}}
+    path = _chat_path(workspace_id, chat_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    temporary.replace(path)
     return True
 
 
-def load_chat(chat_id: str) -> list[dict[str, Any]]:
-    """Carga una conversación y migra automáticamente el formato anterior."""
-    if not S3 or not CHAT_BUCKET_NAME:
-        return []
-    obj = S3.get_object(Bucket=CHAT_BUCKET_NAME, Key=_key(chat_id))
-    payload = json.loads(obj["Body"].read().decode("utf-8"))
-    return _normalize_messages(payload)
+def load_chat_data(chat_id: str, workspace_id: str) -> dict:
+    payload = json.loads(_chat_path(workspace_id, chat_id).read_text(encoding="utf-8"))
+    return {"messages": _normalize_messages(payload), "results": payload.get("results", {})}
 
 
-def get_saved_chats() -> list[str]:
-    """Lista chats exclusivamente del prefijo ventas/."""
-    if not S3 or not CHAT_BUCKET_NAME:
-        return []
-    paginator = S3.get_paginator("list_objects_v2")
-    ids = []
-    for page in paginator.paginate(Bucket=CHAT_BUCKET_NAME, Prefix=PREFIX):
-        for item in page.get("Contents", []):
-            key = item["Key"]
-            if key.startswith(PREFIX) and key.endswith(".json") and key != INDEX_KEY:
-                ids.append(key[len(PREFIX):-5])
-    return sorted(ids, reverse=True)
+def load_chat(chat_id: str, workspace_id: str) -> list[dict[str, Any]]:
+    return load_chat_data(chat_id, workspace_id)["messages"]
 
 
-def get_chat_titles() -> dict[str, str]:
-    """Devuelve títulos desde el índice y evita descargas individuales de chats."""
-    return _read_index() if S3 else {}
+def get_saved_chats(workspace_id: str) -> list[str]:
+    directory = get_workspace(workspace_id)["chat_dir"]
+    return [path.stem for path in sorted(directory.glob("chat_*.json"), key=lambda item: item.stat().st_mtime, reverse=True)]
 
 
-def get_chat_title(chat_id: str) -> str:
-    """Consulta el título del índice de chats sin bajar el cuerpo del chat."""
-    return get_chat_titles().get(chat_id, "Nueva conversación")
+def get_chat_titles(workspace_id: str) -> dict[str, str]:
+    titles = {}
+    for chat_id in get_saved_chats(workspace_id):
+        payload = json.loads(_chat_path(workspace_id, chat_id).read_text(encoding="utf-8"))
+        titles[chat_id] = payload.get("title", "Nueva conversación")
+    return titles
 
 
-def delete_chat(chat_id: str) -> bool:
-    """Elimina el chat y su título del índice S3."""
-    if not S3 or not CHAT_BUCKET_NAME:
-        return False
-    S3.delete_object(Bucket=CHAT_BUCKET_NAME, Key=_key(chat_id))
-    index = _read_index()
-    index.pop(chat_id, None)
-    _write_index(index)
+def delete_chat(chat_id: str, workspace_id: str) -> bool:
+    _chat_path(workspace_id, chat_id).unlink(missing_ok=True)
     return True

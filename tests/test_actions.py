@@ -1,5 +1,7 @@
 """Pruebas de gráficos, exportación y resultados de sesión."""
 
+from pathlib import Path
+
 import pandas as pd
 
 from services import actions
@@ -36,3 +38,12 @@ def test_action_validation(tmp_path, monkeypatch):
     assert not actions.export_file(results, "missing", "csv", "file").get("ok")
     assert not actions.export_file(results, "r1", "json", "file").get("ok")
     assert not actions.export_file(results, "r1", "csv", "../fuera").get("ok")
+
+
+def test_artifacts_can_be_saved_in_the_active_workspace(tmp_path):
+    output_dir = tmp_path / "workspace" / "outputs"
+    results = sample_results()
+    chart = actions.create_chart(results, "r1", "bar", "producto", "unidades", "Unidades", output_dir)
+    export = actions.export_file(results, "r1", "csv", "resumen", output_dir)
+    assert Path(chart["chart_path"]).parent == output_dir
+    assert Path(export["file_path"]).parent == output_dir

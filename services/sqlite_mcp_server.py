@@ -1,5 +1,6 @@
 """Servidor MCP seguro que expone la lectura de la base de ventas."""
 
+import argparse
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -12,8 +13,12 @@ server = FastMCP("ventas-sqlite-readonly")
 @server.tool(name="read_query")
 def read_query(query: str) -> dict[str, Any]:
     """Ejecuta SELECT/WITH de solo lectura y devuelve un máximo de 1000 filas."""
+    return _read_query(query, DB_PATH)
+
+
+def _read_query(query: str, db_path: Path) -> dict[str, Any]:
     try:
-        uri = f"file:{DB_PATH.as_posix()}?mode=ro"
+        uri = f"file:{Path(db_path).resolve().as_posix()}?mode=ro"
         with sqlite3.connect(uri, uri=True, timeout=5) as connection:
             connection.row_factory = sqlite3.Row
             rows = [dict(row) for row in connection.execute(query).fetchmany(1001)]
@@ -23,4 +28,7 @@ def read_query(query: str) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db-path", type=Path, default=DB_PATH)
+    DB_PATH = parser.parse_args().db_path.resolve()
     server.run(transport="stdio")

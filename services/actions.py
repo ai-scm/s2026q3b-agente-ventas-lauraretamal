@@ -11,7 +11,7 @@ import pandas as pd
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs"
 
 
-def create_chart(results: dict[str, dict[str, Any]], result_id: str, chart_type: str, x: str, y: str, title: str) -> dict[str, Any]:
+def create_chart(results: dict[str, dict[str, Any]], result_id: str, chart_type: str, x: str, y: str, title: str, output_dir: Path | None = None) -> dict[str, Any]:
     """Crea un gráfico PNG con el resultado identificado en el registro de sesión."""
     if not isinstance(result_id, str):
         return {"ok": False, "message": "result_id debe ser texto."}
@@ -31,11 +31,12 @@ def create_chart(results: dict[str, dict[str, Any]], result_id: str, chart_type:
         values = [float(row[y]) for row in rows]
     except (KeyError, TypeError, ValueError) as exc:
         return {"ok": False, "message": f"La columna y debe contener valores numéricos: {exc}"}
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir = output_dir or OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
     if not isinstance(title, str):
         return {"ok": False, "message": "title debe ser texto."}
     stem = re.sub(r"[^\w.-]+", "_", title, flags=re.UNICODE).strip("._-")[:60] or "ventas"
-    path = OUTPUT_DIR / f"{stem}_{result_id}.png"
+    path = output_dir / f"{stem}_{result_id}.png"
     fig, ax = plt.subplots(figsize=(10, 6))
     if chart_type == "bar":
         ax.bar(labels, values)
@@ -57,7 +58,7 @@ def create_chart(results: dict[str, dict[str, Any]], result_id: str, chart_type:
     return {"ok": True, "result_id": result_id, "chart_path": str(path)}
 
 
-def export_file(results: dict[str, dict[str, Any]], result_id: str, format: str, filename: str) -> dict[str, Any]:
+def export_file(results: dict[str, dict[str, Any]], result_id: str, format: str, filename: str, output_dir: Path | None = None) -> dict[str, Any]:
     """Exporta todas las filas de un resultado como CSV o XLSX en outputs/."""
     if not isinstance(result_id, str):
         return {"ok": False, "message": "result_id debe ser texto."}
@@ -72,8 +73,9 @@ def export_file(results: dict[str, dict[str, Any]], result_id: str, format: str,
     stem = filename[:-len(suffix)] if filename.lower().endswith(suffix) else filename
     if not stem:
         return {"ok": False, "message": "El nombre de archivo no puede estar vacío."}
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    path = OUTPUT_DIR / f"{stem}{suffix}"
+    output_dir = output_dir or OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{stem}{suffix}"
     frame = pd.DataFrame(result["rows"], columns=result["columns"])
     try:
         if format == "csv":

@@ -9,17 +9,19 @@ import os
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 import streamlit as st
 from langchain_core.messages import AIMessage, SystemMessage
-from services.database import ensure_database
-from services.prompt import SYSTEM_PROMPT
+from services.prompt import dataset_prompt
 from services.sales_agent import assistant_text, create_sales_agent
 from services.chat_storage import new_chat_id, save_chat
 from services.chat_history import model_history
+from services.workspaces import DEFAULT_ID, get_workspace, initialize_workspaces
 from ui.chat import hide_chat_icons, show_messages
 
-st.set_page_config(page_title="Agente de análisis de ventas", page_icon="img/icon.svg", layout="wide")
+st.set_page_config(page_title="Agente de análisis de datos", page_icon="img/icon.svg", layout="wide")
 hide_chat_icons()
-ensure_database()
+initialize_workspaces()
 
+if "workspace_id" not in st.session_state:
+    st.session_state.workspace_id = DEFAULT_ID
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "chat_id" not in st.session_state:
@@ -28,16 +30,13 @@ if "results" not in st.session_state:
     st.session_state.results = {}
 if "agent_graph" not in st.session_state:
     st.session_state.agent_graph = None
-if st.session_state.get("agent_chat_id") != st.session_state.chat_id:
-    st.session_state.results = {}
-    st.session_state.agent_graph = None
-    st.session_state.agent_chat_id = st.session_state.chat_id
+workspace = get_workspace(st.session_state.workspace_id)
 
 from ui.sidebar import show_sidebar
 show_sidebar()
-st.title("Agente de análisis de ventas")
-st.caption("Consulta las ventas en lenguaje natural y recibe tablas, gráficos o archivos.")
-show_messages()
+st.title("Agente de análisis de datos")
+st.caption("Consulta tus datos en lenguaje natural y recibe tablas, gráficos o archivos.")
+show_messages(workspace["output_dir"])
 
 
 def _message_history():
@@ -88,7 +87,7 @@ def _aws_error(exc):
     return f"Error de Amazon Bedrock: {exc}"
 
 
-question = st.chat_input("Pregunta por tus ventas…")
+question = st.chat_input("Pregunta por tus datos…")
 if question:
     st.session_state.messages.append({"role": "user", "text": question, "sql": None, "table": None, "chart_path": None, "file_path": None})
     with st.chat_message("user", avatar=None):
@@ -96,12 +95,14 @@ if question:
     try:
         if st.session_state.agent_graph is None:
             with st.spinner("Conectando con el servidor SQL..."):
-                st.session_state.agent_graph = asyncio.run(create_sales_agent(st.session_state.results))
+                st.session_state.agent_graph = asyncio.run(create_sales_agent(
+                    st.session_state.results, workspace["db_path"], workspace["output_dir"], workspace["default"],
+                ))
         summary = [
             {"result_id": rid, "columns": data["columns"], "total_rows": data["total_rows"], "query": data["query"], "rows": data["rows"][:5]}
             for rid, data in list(st.session_state.results.items())[-8:]
         ]
-        context = SYSTEM_PROMPT + "\nResultados disponibles de esta conversación: " + json.dumps(summary, ensure_ascii=False)
+        context = dataset_prompt(workspace["schema"], workspace["default"]) + "\nResultados disponibles de esta conversación: " + json.dumps(summary, ensure_ascii=False)
         inputs = {"messages": [SystemMessage(content=context), *_message_history()], "tool_calls_used": 0, "limit_reached": False}
         with st.spinner("Analizando tus ventas..."):
             response = asyncio.run(st.session_state.agent_graph.ainvoke(inputs))
@@ -115,19 +116,19 @@ if question:
         elif outputs["file_paths"]:
             answer = "Listo. Preparé los archivos solicitados para descargar."
         elif outputs["table"] is not None and outputs["total_rows"] == 0:
-            answer = "No encontré ventas que coincidan con esos criterios."
+            answer = "No encontré ventas que coincidan con esos criterios." if workspace["default"] else "No encontré registros que coincidan con esos criterios."
         elif outputs["table"]:
             answer = "Aquí están los resultados solicitados."
         st.session_state.messages.append({"role": "assistant", "text": answer, **outputs})
         try:
-            save_chat(st.session_state.messages, st.session_state.chat_id)
+            save_chat(st.session_state.messages, st.session_state.chat_id, st.session_state.workspace_id, st.session_state.results)
         except Exception as exc:
-            st.sidebar.warning(f"No se pudo guardar en S3: {exc}")
+            st.sidebar.warning(f"No se pudo guardar la conversación localmente: {exc}")
         st.rerun()
     except Exception as exc:
         st.session_state.messages.append({"role": "assistant", "text": _aws_error(exc), "sql": None, "table": None, "chart_path": None, "file_path": None})
         try:
-            save_chat(st.session_state.messages, st.session_state.chat_id)
-        except Exception:
-            pass
+            save_chat(st.session_state.messages, st.session_state.chat_id, st.session_state.workspace_id, st.session_state.results)
+        except Exception as save_error:
+            st.sidebar.warning(f"No se pudo guardar la conversación localmente: {save_error}")
         st.rerun()

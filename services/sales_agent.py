@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from services.actions import create_chart, export_file
 from services.bedrock import MODEL_ID, REGION_NAME
-from services.mcp_sql import get_read_query_tool, run_sql
+from services.mcp_sql import DB_PATH, get_read_query_tool, run_sql
 
 
 class ChartRequest(BaseModel):
@@ -199,7 +199,7 @@ def _top_per_group(rows: list[dict[str, Any]], group_by: str, rank_by: str, dire
     return sorted(winners.values(), key=lambda row: str(row[group_by]))
 
 
-def create_sales_graph(results: dict[str, dict[str, Any]], mcp_tool: Any):
+def create_sales_graph(results: dict[str, dict[str, Any]], mcp_tool: Any, output_dir=None, sales_schema: bool = True):
     """Compila un plan de una llamada y ejecuta SQL, gráficos y archivos en serie."""
     model = ChatBedrockConverse(model=MODEL_ID, region_name=REGION_NAME, temperature=0)
     planner = model.bind_tools([SalesPlan], tool_choice="any")
@@ -263,12 +263,12 @@ def create_sales_graph(results: dict[str, dict[str, Any]], mcp_tool: Any):
         exports = plan.exports if output_intent in {"export", "chart_and_export"} else []
         latest_user = next((message.content for message in reversed(state["messages"]) if isinstance(message, HumanMessage) and isinstance(message.content, str)), "")
         recent_context = " ".join(message.content for message in state["messages"] if isinstance(message, HumanMessage) and isinstance(message.content, str))
-        charts = _expand_contextual_charts(charts, results, latest_user)
+        charts = _expand_contextual_charts(charts, results, latest_user) if sales_schema else charts
         if len(charts) > 2 or len(exports) > 2:
             return {"messages": [*tool_messages, AIMessage(content="Limité este turno a dos gráficos y dos archivos. Divide la solicitud para continuar.")]}
         result_id = ""
-        contextual_export_query = _contextual_export_query(exports, results, latest_user, recent_context)
-        query = contextual_export_query or ((_group_rank_query(plan) or _rank_query(plan.query, plan)) if plan.query else "")
+        contextual_export_query = _contextual_export_query(exports, results, latest_user, recent_context) if sales_schema else ""
+        query = contextual_export_query or (((_group_rank_query(plan) if sales_schema else "") or _rank_query(plan.query, plan)) if plan.query else "")
         if query:
             result = await run_sql(query, read_query_tool=mcp_tool)
             if not result.get("ok"):
@@ -317,7 +317,8 @@ def create_sales_graph(results: dict[str, dict[str, Any]], mcp_tool: Any):
             if source_id:
                 value = results[source_id]
                 tool_messages.append(ToolMessage(content=json.dumps({"ok": True, "result_id": source_id, "columns": value["columns"], "rows": value["rows"][:50], "total_rows": value["total_rows"], "query": value["query"]}, ensure_ascii=False), tool_call_id=call["id"] + "-data", name="result_data"))
-                output = create_chart(results, source_id, chart.chart_type, chart.x, chart.y, chart.title)
+                chart_args = (results, source_id, chart.chart_type, chart.x, chart.y, chart.title)
+                output = create_chart(*chart_args, output_dir=output_dir) if output_dir else create_chart(*chart_args)
             else:
                 output = {"ok": False, "message": "No hay un resultado completo compatible con este gráfico."}
             tool_messages.append(ToolMessage(content=json.dumps(output, ensure_ascii=False), tool_call_id=call["id"] + "-chart", name="create_chart"))
@@ -349,7 +350,7 @@ def create_sales_graph(results: dict[str, dict[str, Any]], mcp_tool: Any):
                 source_id = next((rid for rid, value in reversed(list(results.items())) if rid != result_id and matches_export(rid)), "")
             else:
                 source_id = export.result_id if export.result_id in results and matches_export(export.result_id) else ""
-            if not source_id and export.use_previous:
+            if not source_id and export.use_previous and sales_schema:
                 requested = {column_key(column) for column in export.columns}
                 dimensions = [name for name in ("sede", "vendedor", "producto") if name in requested]
                 metrics = []
@@ -369,7 +370,8 @@ def create_sales_graph(results: dict[str, dict[str, Any]], mcp_tool: Any):
             if source_id:
                 value = results[source_id]
                 tool_messages.append(ToolMessage(content=json.dumps({"ok": True, "result_id": source_id, "columns": value["columns"], "rows": value["rows"][:50], "total_rows": value["total_rows"], "query": value["query"]}, ensure_ascii=False), tool_call_id=call["id"] + "-data", name="result_data"))
-                output = export_file(results, source_id, export.format, export.filename)
+                export_args = (results, source_id, export.format, export.filename)
+                output = export_file(*export_args, output_dir=output_dir) if output_dir else export_file(*export_args)
             else:
                 output = {"ok": False, "message": "No hay resultados disponibles para exportar."}
             tool_messages.append(ToolMessage(content=json.dumps(output, ensure_ascii=False), tool_call_id=call["id"] + "-export", name="export_file"))
@@ -382,7 +384,7 @@ def create_sales_graph(results: dict[str, dict[str, Any]], mcp_tool: Any):
             return {"messages": [*tool_messages, AIMessage(content="No pude preparar una consulta para esa solicitud.")]}
 
         if result_id and not results[result_id]["rows"]:
-            answer = "No encontré ventas que coincidan con esos criterios."
+            answer = "No encontré ventas que coincidan con esos criterios." if sales_schema else "No encontré registros que coincidan con esos criterios."
         elif chart_paths and file_paths:
             answer = "Listo. Generé los gráficos y preparé los archivos solicitados."
         elif chart_paths:
@@ -404,9 +406,9 @@ def create_sales_graph(results: dict[str, dict[str, Any]], mcp_tool: Any):
     return graph.compile()
 
 
-async def create_sales_agent(results: dict[str, dict[str, Any]]):
-    """Conecta una sola herramienta de lectura MCP y compila el flujo."""
-    return create_sales_graph(results, await get_read_query_tool())
+async def create_sales_agent(results: dict[str, dict[str, Any]], db_path=DB_PATH, output_dir=None, sales_schema: bool = True):
+    """Conecta el agente con la base y carpeta de resultados de su espacio."""
+    return create_sales_graph(results, await get_read_query_tool(db_path), output_dir, sales_schema)
 
 
 def assistant_text(message: BaseMessage) -> str:

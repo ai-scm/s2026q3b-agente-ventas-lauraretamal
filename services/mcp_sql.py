@@ -11,8 +11,8 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "data" / "ventas.db"
 WRITE_WORDS = re.compile(r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|PRAGMA)\b", re.I)
-_client: MultiServerMCPClient | None = None
-_read_query_tool = None
+_clients: dict[Path, MultiServerMCPClient] = {}
+_read_query_tools: dict[Path, Any] = {}
 
 
 def validate_query(query: str) -> tuple[bool, str, str]:
@@ -32,28 +32,28 @@ def validate_query(query: str) -> tuple[bool, str, str]:
     return True, "", statement
 
 
-def _get_client() -> MultiServerMCPClient:
-    """Construye el cliente stdio del servidor oficial SQLite."""
-    global _client
-    if _client is None:
-        _client = MultiServerMCPClient({"sqlite": {
+def _get_client(db_path: Path = DB_PATH) -> MultiServerMCPClient:
+    """Construye el cliente stdio del servidor local para una base SQLite."""
+    db_path = Path(db_path).resolve()
+    if db_path not in _clients:
+        _clients[db_path] = MultiServerMCPClient({"sqlite": {
             "transport": "stdio",
             "command": sys.executable,
-            "args": ["-m", "services.sqlite_mcp_server"],
+            "args": ["-m", "services.sqlite_mcp_server", "--db-path", str(db_path)],
             "cwd": str(ROOT),
         }})
-    return _client
+    return _clients[db_path]
 
 
-async def get_read_query_tool():
-    """Carga y filtra la herramienta read_query del servidor SQLite MCP."""
-    global _read_query_tool
-    if _read_query_tool is None:
-        tools = await _get_client().get_tools(server_name="sqlite")
-        _read_query_tool = next((tool for tool in tools if tool.name == "read_query"), None)
-        if _read_query_tool is None:
+async def get_read_query_tool(db_path: Path = DB_PATH):
+    """Carga la herramienta read_query para la base indicada."""
+    db_path = Path(db_path).resolve()
+    if db_path not in _read_query_tools:
+        tools = await _get_client(db_path).get_tools(server_name="sqlite")
+        _read_query_tools[db_path] = next((tool for tool in tools if tool.name == "read_query"), None)
+        if _read_query_tools[db_path] is None:
             raise RuntimeError("El servidor MCP SQLite no expuso la herramienta read_query.")
-    return _read_query_tool
+    return _read_query_tools[db_path]
 
 
 async def run_sql(query: str, read_query_tool: Any | None = None) -> dict[str, Any]:

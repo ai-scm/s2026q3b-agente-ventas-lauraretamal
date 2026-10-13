@@ -10,7 +10,6 @@ services:
       AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
       BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-amazon.nova-pro-v1:0}
       AWS_REGION: ${AWS_REGION:-us-east-1}
-      CHAT_BUCKET_NAME: ${CHAT_BUCKET_NAME:-}
     volumes:
       - .:/app
       - ${HOME}/.aws:/root/.aws:ro
